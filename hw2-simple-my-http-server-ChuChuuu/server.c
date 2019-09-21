@@ -1,0 +1,412 @@
+#include "status.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <assert.h>
+#include <dirent.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+static struct thread_pool *pool = NULL;
+typedef void (*Function) (void* arg);
+int PORT;
+int Tnum;
+char Root[20];
+
+struct Arg {
+    int A_socket;
+    char datain[300];
+};
+struct task {
+    Function Dofun;
+    void* arg;
+    struct task *next;
+};
+struct thread_pool {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    //task list
+    struct task* taskhead;
+    //thread number
+    int threadNum;
+    //thread id
+    pthread_t* threadID;
+
+};
+void pool_init(int ThreadNum);
+void pool_addtask(Function fun,void* Arg);
+void* run_thread(void* Arg);
+
+void FindDir(char* Sendmsg,char* Dirroute);
+void FindFile(char* Sendmsg,char* Fileroute,int filetype);
+void bad_request(char* send,int status);
+void cutmsg(char* msg,char* retype,char* direct);
+//void func(int a_socket,char* rec_buffer);
+void func(void* arg);
+int Ftest(char* requ_file,char* requ_type,int* filetype);
+
+int main(int argc, char *argv[])
+{
+    int sock,new_fd;
+    struct sockaddr_in self_addr,recv_addr;
+    //int iret = 0;
+    unsigned int len = 0;
+    char buffer[300] = {'\0'};
+    //char tempbuffer[300] = {'\0'};
+    //int fd = 0;
+    //int ret = 0;
+    //get the parameter
+    if(argv[1][1] == 'r') {
+        strcpy(Root,argv[2]);
+        PORT = atoi(argv[4]);
+        Tnum = atoi(argv[6]);
+    } else {
+        strcpy(Root,argv[4]);
+        PORT = atoi(argv[2]);
+        Tnum = atoi(argv[6]);
+    }
+    sock = socket (AF_INET,SOCK_STREAM,0);
+    if(sock<0) {
+        printf("socket error\n");
+    }
+    setsockopt(sock,SOL_SOCKET,SO_REUSEADDR,&(int) {
+        1
+    },sizeof(int));
+
+    memset(&self_addr,0,sizeof(self_addr));
+    self_addr.sin_family = AF_INET;
+    self_addr.sin_port = htons(PORT);
+    self_addr.sin_addr.s_addr = INADDR_ANY;
+
+    if(bind(sock,(struct sockaddr*)&self_addr,sizeof(self_addr)) == -1) {
+        printf("bind error\n");
+    }
+
+    if(listen(sock,5) == -1) {
+        printf("listen error\n");
+    }
+
+    //create the pool
+    pool_init(Tnum);
+    while(1) {
+        memset(&recv_addr,0,sizeof(recv_addr));
+        printf("wait of connect\n");
+        if((new_fd = accept(sock,(struct sockaddr*)&recv_addr,&len)) == -1) {
+            printf("accept error\n");
+        }
+
+//        printf("%d\n",new_fd);
+
+        while(1) {
+            if(read(new_fd,buffer,sizeof(buffer)) <= 0) {
+                printf("client is outline\n");
+                break;
+            } else {
+//                printf("buf is %s\n",buffer);
+            }
+            //strcpy(tempbuffer,buffer);
+            /*
+            	    char requ_type[8]="";
+            	    char file[128]="";
+
+            	    cutmsg(buffer,requ_type,file);
+                        header(file,tempbuffer,1);
+            	    printf("123: %s\n",tempbuffer);
+            	    //strcpy(buffer,"0");
+            	    //strcpy(buffer,tempbuffer);
+            	    write(new_fd,tempbuffer,sizeof(tempbuffer));
+            	    strcpy(tempbuffer,"0");
+            */
+
+            //func(new_fd,buffer);
+            //test thread haha
+            struct Arg A_in;
+            A_in.A_socket = new_fd;
+            //A_in.datain = buffer;
+            strcpy(A_in.datain,buffer);
+            pool_addtask(func,(void*)&A_in);
+
+            //memset(buffer,'\0',sizeof(buffer));
+        }
+    }
+
+    close(new_fd);
+    close(sock);
+
+
+
+}
+void func(void *arg)
+{
+    //printf("in\n");
+    struct Arg *argu = ( struct Arg *)arg;
+    char requ_type[8]="";
+    char file[128]="";
+    char Rec_msg[300]="";
+    char Sen_msg[4096]="";
+    char* rec_buffer;
+    int a_socket;
+    int status;
+    int Filetype = 8;
+    int value = 0;
+    rec_buffer = argu->datain;
+    a_socket = argu->A_socket;
+    strcpy(Rec_msg,rec_buffer);
+    cutmsg(Rec_msg,requ_type,file);
+    //first test
+    status = Ftest(file,requ_type,&Filetype);
+//    printf("status:%d type:%d %s\n",status,Filetype,file);
+    switch(status) {
+    case BAD_REQUEST:
+        bad_request(Sen_msg,BAD_REQUEST);
+//        write(a_socket,Sen_msg,sizeof(Sen_msg));
+//        return;
+        break;
+    case METHOD_NOT_ALLOWED:
+        bad_request(Sen_msg,METHOD_NOT_ALLOWED);
+//        write(a_socket,Sen_msg,sizeof(Sen_msg));
+//        return;
+        break;
+    case UNSUPPORT_MEDIA_TYPE:
+        bad_request(Sen_msg,UNSUPPORT_MEDIA_TYPE);
+//        write(a_socket,Sen_msg,sizeof(Sen_msg));
+//        return;
+        break;
+    //5 is file
+    case 5:
+        FindDir(Sen_msg,file);
+        break;
+    //6 is file
+    case 6:
+        FindFile(Sen_msg,file,Filetype);
+//	write(a_socket,Sen_msg,sizeof(Sen_msg));
+        break;
+    default:
+        break;
+    }
+//   printf("123: %s\n",Sen_msg);
+    value=write(a_socket,Sen_msg,sizeof(Sen_msg));
+    strcpy(Sen_msg,"");
+
+}
+void FindDir(char* Sendmsg,char* Dirroute)
+{
+    char Route[128] = ".";
+    strcat(Route,Root);
+    strcat(Route,Dirroute);
+    char filename[256][256];
+    int len = 0;
+    int i;
+    DIR *d;
+    struct dirent *file;
+//    struct stat sb;
+    if(!(d=opendir(Route))) {
+        strcpy(Sendmsg,"HTTP/1.x ");
+        strcat(Sendmsg,"404 NOT_FOUND\r\nContent-type: \r\nServer: httpserver/1.x\r\n\r\n");
+        return;
+    }
+    while((file = readdir(d)) != NULL) {
+        if(strncmp(file->d_name,".",1) == 0) {
+            continue;
+        }
+        strcpy(filename[len++],file->d_name);
+    }
+    strcpy(Sendmsg,"HTTP/1.x ");
+    strcat(Sendmsg,"200 OK\r\nContent-type: directory\r\nServer: httpserver/1.x\r\n\r\n");
+
+    for(i = 0 ; i < len ; i++) {
+        strcat(Sendmsg,filename[i]);
+        if(i < len-1) {
+            strcat(Sendmsg," ");
+        }
+    }
+    strcat(Sendmsg,"\n");
+    return;
+
+}
+/*
+void trave_dir(char* path,int depth){
+	DIR *d;
+	struct dirent *file;
+	struct stat sb;
+	if(
+}
+*/
+void FindFile(char* Sendmsg,char* Fileroute,int filetype)
+{
+    char Route[128]=".";
+    strcat(Route,Root);
+    strcat(Route,Fileroute);
+    FILE *fp;
+    char eachline[300]="";
+    fp = fopen(Route,"r");
+    if(fp == NULL) {
+        strcpy(Sendmsg,"HTTP/1.x ");
+        strcat(Sendmsg,"404 NOT_FOUND\r\nContent-type: \r\nServer: httpserver/1.x\r\n\r\n");
+        //fclose(fp);
+        return;
+    } else {
+        strcpy(Sendmsg,"HTTP/1.x ");
+        strcat(Sendmsg,"200 OK\r\nContent-type: ");
+        strcat(Sendmsg,extensions[filetype].mime_type);
+        strcat(Sendmsg,"\r\nServer: httpserver/1.x\r\n\r\n");
+        while(fgets(eachline,300,fp)) {
+            strcat(Sendmsg,eachline);
+        }
+        strcat(Sendmsg,"\n");
+    }
+    fclose(fp);
+    return;
+
+
+}
+void cutmsg(char* msg, char* retype, char* direct)
+{
+//    printf("msg: %s\n", msg);
+    char cut[] = " ";
+    char* retype_s;
+    char* direct_s;
+    retype_s = strtok(msg,cut);
+    direct_s = strtok(NULL,cut);
+    strcpy(retype,retype_s);
+    strcpy(direct,direct_s);
+    //printf("%s %s \n",retype,direct);
+}
+
+void bad_request(char* send,int status)
+{
+    switch(status) {
+    case BAD_REQUEST:
+        strcpy(send,"HTTP/1.x ");
+        strcat(send,"400 BAD_REQUEST\r\nContent-type: \r\nServer: httpserver/1.x\r\n\r\n");
+        break;
+    case METHOD_NOT_ALLOWED:
+        strcpy(send,"HTTP/1.x ");
+        strcat(send,"405 METHOD_NOT_ALLOWED\r\nContent-type: \r\nServer: httpserver/1.x\r\n\r\n");
+        break;
+    case UNSUPPORT_MEDIA_TYPE:
+        strcpy(send,"HTTP/1.x ");
+        strcat(send,"415 UNSUPPORT_MEDIA_TYPE\r\nContent-type: \nServer: httpserver/1.x\r\n\r\n");
+        break;
+
+    default:
+        break;
+    }
+    return;
+
+
+
+}
+int Ftest(char* requ_file,char* requ_type,int* filetype)
+{
+    int i;
+    char test[10]="";
+    char* t_requ_file;
+    char dot[] = ".";
+    int status = UNSUPPORT_MEDIA_TYPE;
+    t_requ_file=strpbrk(requ_file,dot);
+    if(strcmp(requ_type,"PUSH") == 0 || strcmp(requ_type,"HEAD") == 0 || strcmp(requ_type,"get") == 0) {
+        status = METHOD_NOT_ALLOWED;
+        return status;
+    }
+
+    if(requ_file[0]!='/') {
+        status =  BAD_REQUEST;
+        return status;
+    }
+    for(i = 0 ; i < 8 ; i ++) {
+        strcpy(test,".");
+        strcat(test,extensions[i].ext);
+//        printf("com:%s,%s,%s\n",requ_file,t_requ_file,test);
+        //is a directory == 5
+        if(t_requ_file == NULL) {
+            status = 5;
+            return status;
+        }
+        //is a file == 6;
+        if(strcmp(t_requ_file,test)==0) {
+            //          printf("com:%s,%s\n",requ_file,test);
+            status = 6;
+            *filetype = i;
+            return status;
+        }
+    }
+    return status;
+}
+void pool_init(int ThreadNum)
+{
+    pool = (struct thread_pool*)malloc(sizeof(struct thread_pool));
+    assert(pool != NULL);
+
+    pthread_mutex_init(&(pool->mutex),NULL);
+    pthread_cond_init(&(pool->cond),NULL);
+    //list
+    pool -> taskhead = NULL;
+    //thread num
+    pool -> threadNum = ThreadNum;
+    pool -> threadID = (pthread_t*)malloc(sizeof(pthread_t) * pool->threadNum);
+    //creat thread
+    int i;
+    for( i = 0 ; i < pool->threadNum ; i++) {
+        pthread_create(&(pool->threadID[i]),NULL,run_thread,NULL);
+//        printf("create%d:%d\n",i,pool->threadID[i]);
+    }
+}
+void pool_addtask(Function fun,void* Arg)
+{
+    //create a new task
+    struct task* nTask = (struct task*)malloc(sizeof(struct task));
+    nTask -> Dofun = fun;
+    nTask -> arg = Arg;
+    nTask -> next = NULL;
+
+    //add task into linklist
+    pthread_mutex_lock(&(pool->mutex));
+    //get the lock
+    struct task* head = pool->taskhead;
+    if(head == NULL) {
+        pool -> taskhead = nTask;
+    } else {
+        //put it at tail
+        while(head -> next != NULL) {
+            head = head -> next;
+        }
+        head -> next = nTask;
+    }
+    //  printf("sdf\n");
+    pthread_mutex_unlock(&(pool->mutex));
+    pthread_cond_signal(&(pool->cond));
+//    printf("aaa\n");
+}
+void* run_thread(void* Arg)
+{
+    //test who
+//    printf("thread %d ready\n",pthread_self());
+    struct task* ctask;
+    for(;;) {
+        pthread_mutex_lock(&(pool->mutex));
+        if(pool -> taskhead == NULL) {
+            //test
+//            printf("thread %d waiting\n",pthread_self());
+            pthread_cond_wait(&(pool->cond),&(pool->mutex));
+            //pthread_mutex_unlock((&pool->mutex));
+            //while(1);
+        }
+        //test
+//        printf("%d going to work\n",pthread_self());
+        assert(pool->taskhead != NULL);
+
+        ctask = pool -> taskhead;
+        pool -> taskhead = pool->taskhead->next;
+        pthread_mutex_unlock(&(pool->mutex));
+        (ctask -> Dofun)(ctask -> arg);
+        free(ctask);
+        ctask = NULL;
+    }
+}
+
